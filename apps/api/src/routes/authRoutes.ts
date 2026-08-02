@@ -7,6 +7,8 @@ import {
 
 import {
   DuplicateEmailError,
+  InvalidCredentialsError,
+  loginUser,
   registerUser,
 } from "../services/authService";
 
@@ -14,6 +16,11 @@ const router = Router();
 
 interface RegisterRequestBody {
   name?: unknown;
+  email?: unknown;
+  password?: unknown;
+}
+
+interface LoginRequestBody {
   email?: unknown;
   password?: unknown;
 }
@@ -36,9 +43,6 @@ router.post(
   ) => {
     const { name, email, password } = req.body;
 
-    /*
-     * Verify that all required values are strings.
-     */
     if (
       typeof name !== "string" ||
       typeof email !== "string" ||
@@ -64,10 +68,6 @@ router.post(
       });
     }
 
-    /*
-     * This is intentionally a basic email-format check.
-     * PostgreSQL still enforces uniqueness separately.
-     */
     const emailPattern =
       /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -97,6 +97,67 @@ router.post(
     } catch (error: unknown) {
       if (error instanceof DuplicateEmailError) {
         return res.status(409).json({
+          error: error.message,
+        });
+      }
+
+      return next(error);
+    }
+  },
+);
+
+/*
+ * POST /auth/login
+ *
+ * Verify a registered user's credentials and return a JWT.
+ */
+router.post(
+  "/login",
+  async (
+    req: Request<
+      Record<string, never>,
+      unknown,
+      LoginRequestBody
+    >,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    const { email, password } = req.body;
+
+    if (
+      typeof email !== "string" ||
+      typeof password !== "string"
+    ) {
+      return res.status(400).json({
+        error: "Email and password are required",
+      });
+    }
+
+    const trimmedEmail = email.trim();
+
+    if (
+      trimmedEmail.length === 0 ||
+      password.length === 0
+    ) {
+      return res.status(400).json({
+        error: "Email and password are required",
+      });
+    }
+
+    try {
+      const token = await loginUser({
+        email: trimmedEmail,
+        password,
+      });
+
+      return res.status(200).json({
+        token,
+      });
+    } catch (error: unknown) {
+      if (
+        error instanceof InvalidCredentialsError
+      ) {
+        return res.status(401).json({
           error: error.message,
         });
       }

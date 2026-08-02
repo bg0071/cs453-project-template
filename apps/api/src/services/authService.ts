@@ -1,5 +1,7 @@
 import bcrypt from "bcrypt";
+import jwt, { SignOptions } from "jsonwebtoken";
 
+import { env } from "../config/env";
 import { pool } from "../db/pool";
 
 export type UserRole = "user" | "admin";
@@ -10,6 +12,14 @@ interface UserRow {
   email: string;
   role: UserRole;
   created_at: Date | string;
+}
+
+/*
+ * This row includes the password hash and is used only
+ * internally while checking login credentials.
+ */
+interface LoginUserRow extends UserRow {
+  password_hash: string;
 }
 
 export interface PublicUser {
@@ -26,9 +36,25 @@ export interface RegisterUserInput {
   password: string;
 }
 
+export interface LoginUserInput {
+  email: string;
+  password: string;
+}
+
 /*
- * Represents an attempted registration with an email address
- * that already belongs to another account.
+ * This describes the information placed inside the JWT.
+ *
+ * Password information must never be placed in this object.
+ */
+export interface AuthTokenPayload {
+  userId: number;
+  email: string;
+  role: UserRole;
+}
+
+/*
+ * Represents an attempted registration using an email
+ * address that already belongs to another account.
  */
 export class DuplicateEmailError extends Error {
   constructor() {
@@ -38,7 +64,20 @@ export class DuplicateEmailError extends Error {
 }
 
 /*
- * Convert a database row into the user object that may safely
+ * Used for both an unknown email and an incorrect password.
+ *
+ * Returning the same error for both cases avoids revealing
+ * whether a particular email address is registered.
+ */
+export class InvalidCredentialsError extends Error {
+  constructor() {
+    super("Invalid email or password");
+    this.name = "InvalidCredentialsError";
+  }
+}
+
+/*
+ * Convert a database row into a user object that may safely
  * be returned by the API.
  *
  * The password hash is intentionally not included.
@@ -49,7 +88,9 @@ function toPublicUser(row: UserRow): PublicUser {
     name: row.name,
     email: row.email,
     role: row.role,
-    createdAt: new Date(row.created_at).toISOString(),
+    createdAt: new Date(
+      row.created_at,
+    ).toISOString(),
   };
 }
 
@@ -63,14 +104,11 @@ export async function registerUser(
   input: RegisterUserInput,
 ): Promise<PublicUser> {
   const normalizedName = input.name.trim();
+
   const normalizedEmail = input.email
     .trim()
     .toLowerCase();
 
-  /*
-   * A cost factor of 12 provides deliberate computational work
-   * when hashing the password.
-   */
   const passwordHash = await bcrypt.hash(
     input.password,
     12,
@@ -107,9 +145,8 @@ export async function registerUser(
     };
 
     /*
-     * PostgreSQL error 23505 means a UNIQUE constraint was
-     * violated. In this table, that normally means the email
-     * address is already registered.
+     * PostgreSQL error 23505 indicates a UNIQUE
+     * constraint violation.
      */
     if (databaseError.code === "23505") {
       throw new DuplicateEmailError();
@@ -117,4 +154,70 @@ export async function registerUser(
 
     throw error;
   }
+}
+
+/*
+ * Verify a user's credentials and return a signed JWT.
+ */
+export async function loginUser(
+  input: LoginUserInput,
+): Promise<string> {
+  const normalizedEmail = input.email
+    .trim()
+    .toLowerCase();
+
+  const result = await pool.query<LoginUserRow>(
+    `
+      SELECT
+        id,
+        name,
+        email,
+        password_hash,
+        role,
+        created_at
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+    `,
+    [normalizedEmail],
+  );
+
+  const user = result.rows[0];
+
+  /*
+   * Do not reveal whether the email address exists.
+   */
+  if (!user) {
+    throw new InvalidCredentialsError();
+  }
+
+  const passwordMatches = await bcrypt.compare(
+    input.password,
+    user.password_hash,
+  );
+
+  if (!passwordMatches) {
+    throw new InvalidCredentialsError();
+  }
+
+  const payload: AuthTokenPayload = {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+  };
+
+  /*
+   * The TypeScript definitions restrict expiresIn to the
+   * values accepted by jsonwebtoken.
+   */
+  const signOptions: SignOptions = {
+    expiresIn:
+      env.jwtExpiresIn as SignOptions["expiresIn"],
+  };
+
+  return jwt.sign(
+    payload,
+    env.jwtSecret,
+    signOptions,
+  );
 }
