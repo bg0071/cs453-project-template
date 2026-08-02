@@ -6,6 +6,7 @@ import express, {
 
 import { pool } from "./db/pool";
 import authRoutes from "./routes/authRoutes";
+import projectRoutes from "./routes/projectRoutes";
 import taskRoutes from "./routes/taskRoutes";
 
 
@@ -59,6 +60,11 @@ app.get(
  * Registration and login endpoints begin with /auth.
  */
 app.use("/auth", authRoutes);
+
+/*
+ * Authenticated project endpoints begin with /projects.
+ */
+app.use("/projects", projectRoutes);
 
 /*
  * All task endpoints begin with /tasks.
