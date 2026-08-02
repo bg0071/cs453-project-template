@@ -6,16 +6,33 @@ import {
 } from "express";
 
 import {
-  CreateTaskInput,
-  UpdateTaskInput,
-  createTask,
-  deleteTask,
-  getAllTasks,
-  getTaskById,
-  updateTask,
+  authenticate,
+} from "../middleware/authenticate";
+import {
+  ProjectAccessDeniedError,
+  ProjectNotFoundError,
+} from "../services/projectService";
+import {
+  AssignedUserNotFoundError,
+  type CreateTaskInput,
+  createTaskForUser,
+  deleteTaskForUser,
+  getTaskForUser,
+  listTasksForUser,
+  TaskAccessDeniedError,
+  TaskModificationDeniedError,
+  TaskNotFoundError,
+  type TaskStatus,
+  type UpdateTaskInput,
+  updateTaskForUser,
 } from "../services/taskService";
 
 const router = Router();
+
+/*
+ * All task routes require a valid JWT.
+ */
+router.use(authenticate);
 
 function isObjectBody(
   value: unknown,
@@ -30,34 +47,111 @@ function isObjectBody(
 function parseTaskId(
   rawId: string | string[] | undefined,
 ): number | null {
-  if (rawId === undefined || Array.isArray(rawId)) {
+  if (
+    rawId === undefined ||
+    Array.isArray(rawId)
+  ) {
     return null;
   }
 
   const id = Number(rawId);
 
-  if (!Number.isInteger(id) || id <= 0) {
+  if (
+    !Number.isInteger(id) ||
+    id <= 0
+  ) {
     return null;
   }
 
   return id;
 }
 
+function parsePositiveInteger(
+  value: unknown,
+): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value <= 0
+  ) {
+    return null;
+  }
+
+  return value;
+}
+
+function isTaskStatus(
+  value: unknown,
+): value is TaskStatus {
+  return (
+    value === "todo" ||
+    value === "in_progress" ||
+    value === "done"
+  );
+}
+
+/*
+ * Convert expected service errors into their required
+ * HTTP status codes.
+ */
+function handleTaskError(
+  error: unknown,
+  res: Response,
+  next: NextFunction,
+) {
+  if (
+    error instanceof TaskNotFoundError ||
+    error instanceof ProjectNotFoundError ||
+    error instanceof AssignedUserNotFoundError
+  ) {
+    return res.status(404).json({
+      error: error.message,
+    });
+  }
+
+  if (
+    error instanceof TaskAccessDeniedError ||
+    error instanceof
+      TaskModificationDeniedError ||
+    error instanceof ProjectAccessDeniedError
+  ) {
+    return res.status(403).json({
+      error: error.message,
+    });
+  }
+
+  return next(error);
+}
+
 /*
  * GET /tasks
- * Return all tasks.
+ *
+ * Return tasks available to the authenticated user.
  */
 router.get(
   "/",
   async (
-    _req: Request,
+    req: Request,
     res: Response,
     next: NextFunction,
   ) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
     try {
-      const tasks = await getAllTasks();
+      const tasks = await listTasksForUser(
+        req.user.userId,
+        req.user.role,
+      );
+
+      /*
+       * Preserve the Checkpoint 1 response shape: a bare array.
+       */
       return res.status(200).json(tasks);
-    } catch (error) {
+    } catch (error: unknown) {
       return next(error);
     }
   },
@@ -65,7 +159,9 @@ router.get(
 
 /*
  * POST /tasks
- * Create a new task.
+ *
+ * Create a task in a project managed by the authenticated
+ * user.
  */
 router.post(
   "/",
@@ -74,68 +170,129 @@ router.post(
     res: Response,
     next: NextFunction,
   ) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    if (!isObjectBody(req.body)) {
+      return res.status(400).json({
+        error:
+          "Request body must be a JSON object",
+      });
+    }
+
+    const {
+      title,
+      description,
+      status,
+      projectId,
+      assignedTo,
+    } = req.body;
+
+    if (
+      typeof title !== "string" ||
+      title.trim().length === 0
+    ) {
+      return res.status(400).json({
+        error: "Title is required",
+      });
+    }
+
+    if (
+      description !== undefined &&
+      description !== null &&
+      typeof description !== "string"
+    ) {
+      return res.status(400).json({
+        error:
+          "Description must be a string or null",
+      });
+    }
+
+    if (
+      status !== undefined &&
+      !isTaskStatus(status)
+    ) {
+      return res.status(400).json({
+        error:
+          "Status must be todo, in_progress, or done",
+      });
+    }
+
+    const normalizedProjectId =
+      parsePositiveInteger(projectId);
+
+    if (normalizedProjectId === null) {
+      return res.status(400).json({
+        error:
+          "projectId must be a positive integer",
+      });
+    }
+
+    let normalizedAssignedTo:
+      | number
+      | null
+      | undefined;
+
+    if (assignedTo === null) {
+      normalizedAssignedTo = null;
+    } else if (assignedTo !== undefined) {
+      normalizedAssignedTo =
+        parsePositiveInteger(assignedTo) ??
+        undefined;
+
+      if (
+        normalizedAssignedTo === undefined
+      ) {
+        return res.status(400).json({
+          error:
+            "assignedTo must be a positive integer or null",
+        });
+      }
+    }
+
+    const input: CreateTaskInput = {
+      title: title.trim(),
+      projectId: normalizedProjectId,
+    };
+
+    if (description !== undefined) {
+      input.description = description;
+    }
+
+    if (status !== undefined) {
+      input.status = status;
+    }
+
+    if (assignedTo !== undefined) {
+      input.assignedTo =
+        normalizedAssignedTo ?? null;
+    }
+
     try {
-      if (!isObjectBody(req.body)) {
-        return res.status(400).json({
-          error: "Request body must be a JSON object",
-        });
-      }
-
-      const { title, description, status } = req.body;
-
-      if (
-        typeof title !== "string" ||
-        title.trim().length === 0
-      ) {
-        return res.status(400).json({
-          error: "Title is required",
-        });
-      }
-
-      if (
-        description !== undefined &&
-        description !== null &&
-        typeof description !== "string"
-      ) {
-        return res.status(400).json({
-          error: "Description must be a string or null",
-        });
-      }
-
-      if (
-        status !== undefined &&
-        (typeof status !== "string" ||
-          status.trim().length === 0)
-      ) {
-        return res.status(400).json({
-          error: "Status must be a non-empty string",
-        });
-      }
-
-      const input: CreateTaskInput = {
-        title: title.trim(),
-      };
-
-      if (description !== undefined) {
-        input.description = description;
-      }
-
-      if (typeof status === "string") {
-        input.status = status.trim();
-      }
-
-      const task = await createTask(input);
+      const task = await createTaskForUser(
+        input,
+        req.user.userId,
+        req.user.role,
+      );
 
       return res.status(201).json(task);
-    } catch (error) {
-      return next(error);
+    } catch (error: unknown) {
+      return handleTaskError(
+        error,
+        res,
+        next,
+      );
     }
   },
 );
 
 /*
  * GET /tasks/:id
- * Return one task by ID.
+ *
+ * Return one task if the authenticated user may view it.
  */
 router.get(
   "/:id",
@@ -144,33 +301,43 @@ router.get(
     res: Response,
     next: NextFunction,
   ) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    const id = parseTaskId(req.params.id);
+
+    if (id === null) {
+      return res.status(400).json({
+        error: "Invalid task ID",
+      });
+    }
+
     try {
-      const id = parseTaskId(req.params.id);
-
-      if (id === null) {
-        return res.status(400).json({
-          error: "Invalid task ID",
-        });
-      }
-
-      const task = await getTaskById(id);
-
-      if (task === null) {
-        return res.status(404).json({
-          error: "Task not found",
-        });
-      }
+      const task = await getTaskForUser(
+        id,
+        req.user.userId,
+        req.user.role,
+      );
 
       return res.status(200).json(task);
-    } catch (error) {
-      return next(error);
+    } catch (error: unknown) {
+      return handleTaskError(
+        error,
+        res,
+        next,
+      );
     }
   },
 );
 
 /*
  * PATCH /tasks/:id
- * Update one or more task fields.
+ *
+ * Only the project owner or an administrator may update
+ * the task.
  */
 router.patch(
   "/:id",
@@ -179,93 +346,132 @@ router.patch(
     res: Response,
     next: NextFunction,
   ) => {
-    try {
-      const id = parseTaskId(req.params.id);
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
 
-      if (id === null) {
-        return res.status(400).json({
-          error: "Invalid task ID",
-        });
-      }
+    const id = parseTaskId(req.params.id);
 
-      if (!isObjectBody(req.body)) {
-        return res.status(400).json({
-          error: "Request body must be a JSON object",
-        });
-      }
+    if (id === null) {
+      return res.status(400).json({
+        error: "Invalid task ID",
+      });
+    }
 
-      const updates: UpdateTaskInput = {};
+    if (!isObjectBody(req.body)) {
+      return res.status(400).json({
+        error:
+          "Request body must be a JSON object",
+      });
+    }
 
-      if ("title" in req.body) {
-        const title = req.body.title;
+    const updates: UpdateTaskInput = {};
 
-        if (
-          typeof title !== "string" ||
-          title.trim().length === 0
-        ) {
-          return res.status(400).json({
-            error: "Title must be a non-empty string",
-          });
-        }
+    if ("title" in req.body) {
+      const title = req.body.title;
 
-        updates.title = title.trim();
-      }
-
-      if ("description" in req.body) {
-        const description = req.body.description;
-
-        if (
-          description !== null &&
-          typeof description !== "string"
-        ) {
-          return res.status(400).json({
-            error: "Description must be a string or null",
-          });
-        }
-
-        updates.description = description;
-      }
-
-      if ("status" in req.body) {
-        const status = req.body.status;
-
-        if (
-          typeof status !== "string" ||
-          status.trim().length === 0
-        ) {
-          return res.status(400).json({
-            error: "Status must be a non-empty string",
-          });
-        }
-
-        updates.status = status.trim();
-      }
-
-      if (Object.keys(updates).length === 0) {
+      if (
+        typeof title !== "string" ||
+        title.trim().length === 0
+      ) {
         return res.status(400).json({
           error:
-            "Provide at least one field: title, description, or status",
+            "Title must be a non-empty string",
         });
       }
 
-      const task = await updateTask(id, updates);
+      updates.title = title.trim();
+    }
 
-      if (task === null) {
-        return res.status(404).json({
-          error: "Task not found",
+    if ("description" in req.body) {
+      const description =
+        req.body.description;
+
+      if (
+        description !== null &&
+        typeof description !== "string"
+      ) {
+        return res.status(400).json({
+          error:
+            "Description must be a string or null",
         });
       }
+
+      updates.description = description;
+    }
+
+    if ("status" in req.body) {
+      const status = req.body.status;
+
+      if (!isTaskStatus(status)) {
+        return res.status(400).json({
+          error:
+            "Status must be todo, in_progress, or done",
+        });
+      }
+
+      updates.status = status;
+    }
+
+    if ("assignedTo" in req.body) {
+      const assignedTo =
+        req.body.assignedTo;
+
+      if (assignedTo === null) {
+        updates.assignedTo = null;
+      } else {
+        const normalizedAssignedTo =
+          parsePositiveInteger(assignedTo);
+
+        if (
+          normalizedAssignedTo === null
+        ) {
+          return res.status(400).json({
+            error:
+              "assignedTo must be a positive integer or null",
+          });
+        }
+
+        updates.assignedTo =
+          normalizedAssignedTo;
+      }
+    }
+
+    if (
+      Object.keys(updates).length === 0
+    ) {
+      return res.status(400).json({
+        error:
+          "Provide at least one field: title, description, status, or assignedTo",
+      });
+    }
+
+    try {
+      const task = await updateTaskForUser(
+        id,
+        updates,
+        req.user.userId,
+        req.user.role,
+      );
 
       return res.status(200).json(task);
-    } catch (error) {
-      return next(error);
+    } catch (error: unknown) {
+      return handleTaskError(
+        error,
+        res,
+        next,
+      );
     }
   },
 );
 
 /*
  * DELETE /tasks/:id
- * Delete a task.
+ *
+ * Only the project owner or an administrator may delete
+ * the task.
  */
 router.delete(
   "/:id",
@@ -274,26 +480,34 @@ router.delete(
     res: Response,
     next: NextFunction,
   ) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    const id = parseTaskId(req.params.id);
+
+    if (id === null) {
+      return res.status(400).json({
+        error: "Invalid task ID",
+      });
+    }
+
     try {
-      const id = parseTaskId(req.params.id);
-
-      if (id === null) {
-        return res.status(400).json({
-          error: "Invalid task ID",
-        });
-      }
-
-      const wasDeleted = await deleteTask(id);
-
-      if (!wasDeleted) {
-        return res.status(404).json({
-          error: "Task not found",
-        });
-      }
+      await deleteTaskForUser(
+        id,
+        req.user.userId,
+        req.user.role,
+      );
 
       return res.status(204).send();
-    } catch (error) {
-      return next(error);
+    } catch (error: unknown) {
+      return handleTaskError(
+        error,
+        res,
+        next,
+      );
     }
   },
 );
