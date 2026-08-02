@@ -12,6 +12,8 @@ import {
   registerUser,
 } from "../services/authService";
 
+import { authenticate } from "../middleware/authenticate";
+
 const router = Router();
 
 interface RegisterRequestBody {
@@ -164,6 +166,28 @@ router.post(
 
       return next(error);
     }
+  },
+);
+
+/*
+ * GET /auth/me
+ *
+ * Return the identity obtained from a verified JWT.
+ * This also provides a simple way to test authentication.
+ */
+router.get(
+  "/me",
+  authenticate,
+  (req: Request, res: Response) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    return res.status(200).json({
+      user: req.user,
+    });
   },
 );
 
