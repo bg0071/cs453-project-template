@@ -8,7 +8,7 @@ import { pool } from "./db/pool";
 import authRoutes from "./routes/authRoutes";
 import projectRoutes from "./routes/projectRoutes";
 import taskRoutes from "./routes/taskRoutes";
-
+import userRoutes from "./routes/userRoutes";
 
 export const app = express();
 
@@ -70,6 +70,11 @@ app.use("/projects", projectRoutes);
  * All task endpoints begin with /tasks.
  */
 app.use("/tasks", taskRoutes);
+
+/*
+ * Administrator-only user endpoints begin with /users.
+ */
+app.use("/users", userRoutes);
 
 /*
  * Handle routes that do not exist.
