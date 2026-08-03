@@ -44,3 +44,59 @@ The server continues running and can process later requests.
 The most difficult part was making sure every part of the database configuration matched. Docker needed to be running, WSL needed permission to access Docker, the PostgreSQL container needed the correct database name and credentials, the connection string in `.env` needed to match those settings, and `schema.sql` needed to be applied before the API could query the tasks table.
 
 Separating the normal development database from the automated test database also required the environment configuration to select the correct connection string when the tests run.
+
+# Project Checkpoint 2 — Reflection Answers
+
+## 1. What is the difference between authentication and authorization?
+
+Authentication determines who a user is. In this application, a user authenticates by logging in with an email address and password. After the credentials are verified, the server returns a signed JSON Web Token that identifies the user.
+
+Authorization determines what an authenticated user is allowed to do. After the JWT has been verified, the application checks the user’s role and ownership relationships. For example, a normal user cannot access `GET /users` and cannot modify a task in another user’s project, while an administrator can access or modify any project or task.
+
+## 2. Why should passwords be hashed instead of stored directly?
+
+Passwords should be hashed so the original password is not stored in the database. If plain-text passwords were stored and the database were exposed, every user password would be immediately readable.
+
+This application uses bcrypt to create a one-way password hash during registration. During login, bcrypt compares the submitted password with the stored hash. The application does not need to decrypt or recover the original password. Passwords and password hashes are also excluded from API responses and JWT payloads.
+
+## 3. What information did you include in your JWT, and why?
+
+The JWT contains the user ID, email address, and role. It also receives the standard issued-at and expiration fields when the token is signed.
+
+The user ID identifies the authenticated database user and is used for project ownership and task permission checks. The email helps identify the account represented by the token. The role is used to determine whether the user is a normal user or an administrator.
+
+The JWT does not contain the password or password hash because those values are not needed for authorization and should not be exposed to clients.
+
+## 4. What is the difference between a 401 response and a 403 response?
+
+A `401 Unauthorized` response means the request is not successfully authenticated. The token may be missing, malformed, invalid, or expired.
+
+A `403 Forbidden` response means the user is authenticated, but the user does not have permission to perform the requested operation. For example, a normal user receives `403` when requesting the administrator-only `/users` route or attempting to modify a task owned through another user’s project.
+
+## 5. Where does your application perform role or ownership checks?
+
+JWT authentication is performed in `middleware/authenticate.ts`. This middleware reads the Bearer token, verifies its signature, validates the payload, and places the authenticated identity in `req.user`.
+
+Administrator role checking is performed in `middleware/requireAdmin.ts`. The `/users` router uses this middleware to reject normal users.
+
+Project ownership checks are performed in `services/projectService.ts`. That service determines whether the authenticated user owns the requested project or has the administrator role.
+
+Task ownership and permission checks are performed in `services/taskService.ts`. A normal user may manage tasks in a project they own. A user assigned to a task may view the task, but assignment alone does not provide permission to update or delete it. Administrators are permitted to access and modify all tasks.
+
+## 6. How are users, projects, and tasks related in your database?
+
+A user may own multiple projects. The `projects.owner_id` foreign key references `users.id`.
+
+A project may contain multiple tasks. The `tasks.project_id` foreign key references `projects.id`.
+
+A task may optionally be assigned to a user. The `tasks.assigned_to` foreign key also references `users.id`.
+
+Deleting a project deletes the tasks that belong to that project. Deleting a user removes projects owned by that user. If an assigned user is deleted, the task remains, but its `assigned_to` value becomes `NULL`.
+
+## 7. What was the hardest part of adding authentication or authorization?
+
+The hardest part was preserving the distinction between authentication, authorization, and resource existence while updating the original task API.
+
+The application needed to return `401` when no valid token was supplied, `403` when an authenticated user lacked permission, and `404` when a resource did not exist. To handle this correctly, the services first retrieve the resource and then perform the ownership or role check.
+
+It was also challenging to update the original task CRUD operations so that every task belongs to a valid project while maintaining the existing response format and automated tests. The task tests now create users, projects, JWTs, and foreign-key relationships before testing the task routes.
